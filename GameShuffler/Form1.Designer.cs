@@ -36,7 +36,7 @@ namespace GameShuffler
         /// </summary>
         private void InitializeComponent()
         {
-            runningProcessesSelectionList = new CheckedListBox();
+            runningProcessesSelectionList = new DataGridView();
             label1 = new Label();
             label2 = new Label();
             startButton = new Button();
@@ -53,7 +53,15 @@ namespace GameShuffler
             // 
             // runningProcessesSelectionList
             // 
-            runningProcessesSelectionList.FormattingEnabled = true;
+            runningProcessesSelectionList.AllowUserToAddRows = false;
+            runningProcessesSelectionList.AllowUserToDeleteRows = false;
+            runningProcessesSelectionList.AllowUserToResizeColumns = false;
+            runningProcessesSelectionList.AllowUserToResizeRows = false;
+            runningProcessesSelectionList.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize;
+            runningProcessesSelectionList.Columns.Add(new DataGridViewCheckBoxColumn() { HeaderText = "Shuffle", Width = 50 });
+            runningProcessesSelectionList.Columns.Add(new DataGridViewTextBoxColumn() { HeaderText = "Game", Width = 500 });
+            runningProcessesSelectionList.Columns.Add(new DataGridViewCheckBoxColumn() { HeaderText = "Pause Game?", Width = 100 });
+            runningProcessesSelectionList.Columns.Add(new DataGridViewTextBoxColumn() { HeaderText = "Process ID", Visible = false }); // Hidden column for process ID
             runningProcessesSelectionList.Location = new Point(40, 40);
             runningProcessesSelectionList.Name = "runningProcessesSelectionList";
             runningProcessesSelectionList.Size = new Size(720, 340);
@@ -195,7 +203,7 @@ namespace GameShuffler
 
         #endregion
 
-        private CheckedListBox runningProcessesSelectionList;
+        private DataGridView runningProcessesSelectionList; // Declare the new DataGridView
         private Label label1;
         private Label label2;
         private Button startButton;

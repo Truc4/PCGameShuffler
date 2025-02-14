@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.IO;
 
 namespace GameShuffler
 {
@@ -55,20 +57,30 @@ namespace GameShuffler
 
         Random rand = new Random();
 
+        private const string SettingsFilePath = "settings.json";
+        private Settings settings = new Settings(); // Define an instance of the Settings class
+
         public Form1()
         {
             InitializeComponent();
+            LoadSettings();
+            RefreshList();
+        }
+
+        private void RefreshList()
+        {
+            var allProcesses = Process.GetProcesses();
+            runningProcessesSelectionList.Rows.Clear();
+            foreach (var process in allProcesses.Where(process => !string.IsNullOrEmpty(process.MainWindowTitle)))
+            {
+                var isSelected = settings.SelectedProcessIds.Contains(process.Id);
+                runningProcessesSelectionList.Rows.Add(isSelected, process.MainWindowTitle, true, process.Id);
+            }
         }
 
         private void Refresh_Clicked(object sender, EventArgs e)
         {
-            var allProcesses = Process.GetProcesses();
-            runningProcessesSelectionList.SelectedItems.Clear();
-            runningProcessesSelectionList.Items.Clear();
-            runningProcessesSelectionList.Items.AddRange(
-                allProcesses.Where(process => !string.IsNullOrEmpty(process.MainWindowTitle))
-                            .Select(process => $"{process.MainWindowTitle}\t{process.Id}")
-                            .ToArray());
+            RefreshList();
         }
 
         private void StartButton_Clicked(object sender, EventArgs e)
@@ -79,34 +91,54 @@ namespace GameShuffler
             minTimeTextBox.Enabled = false;
             maxTimeTextBox.Enabled = false;
             stopButton.Enabled = true;
+
             if (!int.TryParse(minTimeTextBox.Text, out minShuffleTime) || minShuffleTime < 0)
             {
                 MessageBox.Show("Minimum shuffle time must be a positive number");
+                return;
             }
 
             if (!int.TryParse(maxTimeTextBox.Text, out maxShuffleTime) || maxShuffleTime < minShuffleTime)
             {
                 MessageBox.Show("Maximum shuffle time must be a positive number greater than minimum shuffle time");
+                return;
             }
 
             if (!RegisterHotKey(this.Handle, RemoveGameKeyId, 0x0000, RemoveGameKey))
             {
                 MessageBox.Show("Failed to initialize remove game key");
+                return;
             }
 
             if (!RegisterHotKey(this.Handle, NextGameKeyId, 0x0000, NextGameKey))
             {
                 MessageBox.Show("Failed to initialize next game key");
+                return;
             }
 
-            foreach (var processString in runningProcessesSelectionList.CheckedItems)
+            settings.SelectedProcessIds.Clear();
+            gamesToShuffle.Clear();
+            foreach (DataGridViewRow row in runningProcessesSelectionList.Rows)
             {
-                var process = Process.GetProcessById(int.Parse(((string)processString).Split("\t")[1]));
-                if (process != null)
+                if (Convert.ToBoolean(row.Cells[0].Value))
                 {
-                    gamesToShuffle.Add(process);
+                    var processId = (int)row.Cells[3].Value;
+                    try
+                    {
+                        var process = Process.GetProcessById(processId);
+                        settings.SelectedProcessIds.Add(processId);
+                        gamesToShuffle.Add(process);
+                    }
+                    catch (ArgumentException)
+                    {
+                        // Process does not exist, skip it
+                    }
                 }
             }
+
+            settings.MinShuffleTime = minShuffleTime;
+            settings.MaxShuffleTime = maxShuffleTime;
+            SaveSettings();
 
             shuffleThread = new Thread(ShuffleLoop);
             shuffleThread.Start();
@@ -115,7 +147,6 @@ namespace GameShuffler
         private void StopButton_Clicked(object sender, EventArgs e)
         {
             refreshButton.Enabled = true;
-            // runningProcessesSelectionList.Items.Clear();
             runningProcessesSelectionList.Enabled = true;
             startButton.Enabled = true;
             minTimeTextBox.Enabled = true;
@@ -125,6 +156,7 @@ namespace GameShuffler
             if (shuffleThread != null)
             {
                 stopShuffle = true;
+                shuffleThread.Join();
             }
 
             UnregisterHotKey(this.Handle, RemoveGameKeyId);
@@ -139,15 +171,20 @@ namespace GameShuffler
                 }
                 process.Dispose();
             }
-            gamesToShuffle = new List<Process>();
+            gamesToShuffle.Clear();
             currentGame = null;
         }
 
         private void ShuffleLoop()
         {
-            foreach (var process in gamesToShuffle)
+            var processesToShuffle = new List<Process>(gamesToShuffle); // gamesToShuffle is modified during the loop, so we need to make a copy
+            foreach (var process in processesToShuffle)
             {
-                SuspendProcess(process);
+                var row = runningProcessesSelectionList.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (int)r.Cells[3].Value == process.Id);
+                if (row != null && Convert.ToBoolean(row.Cells[2].Value))
+                {
+                    SuspendProcess(process);
+                }
             }
 
             while (gamesToShuffle.Any() && !stopShuffle)
@@ -155,12 +192,18 @@ namespace GameShuffler
                 if (currentGame != null && gamesToShuffle.Count > 1)
                 {
                     ShowWindow(currentGame.MainWindowHandle, 7);
-                    SuspendProcess(currentGame);
                 }
 
                 StartNewGame();
 
-                Thread.Sleep(rand.Next(minShuffleTime, maxShuffleTime)*1000);
+                for (int i = 0; i < rand.Next(minShuffleTime, maxShuffleTime) * 1000; i += 100)
+                {
+                    if (stopShuffle)
+                    {
+                        return;
+                    }
+                    Thread.Sleep(100);
+                }
             }
 
             stopShuffle = false;
@@ -168,6 +211,15 @@ namespace GameShuffler
 
         private void StartNewGame()
         {
+            if (currentGame != null)
+            {
+                var row = runningProcessesSelectionList.Rows.Cast<DataGridViewRow>().FirstOrDefault(r => (int)r.Cells[3].Value == currentGame.Id);
+                if (row != null && Convert.ToBoolean(row.Cells[2].Value))
+                {
+                    SuspendProcess(currentGame);
+                }
+            }
+
             var newGame = currentGame;
             while (newGame == currentGame)
             {
@@ -177,7 +229,15 @@ namespace GameShuffler
                 {
                     break;
                 }
-                if (newGame.HasExited)
+                try
+                {
+                    if (newGame.HasExited)
+                    {
+                        gamesToShuffle.RemoveAt(newGameIndex);
+                        newGame = currentGame;
+                    }
+                }
+                catch (Exception ex) when (ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
                 {
                     gamesToShuffle.RemoveAt(newGameIndex);
                     newGame = currentGame;
@@ -189,33 +249,30 @@ namespace GameShuffler
                 return;
             }
 
-            ResumeProcess(newGame);
-            ShowWindow(newGame.MainWindowHandle, 3);
-            SetForegroundWindow(newGame.MainWindowHandle);
-            currentGame = newGame;
-        }
-
-        private static void SuspendProcess(Process process)
-        {
-            foreach (ProcessThread pT in process.Threads)
+            if (newGame != currentGame)
             {
-                IntPtr pOpenThread = OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
-
-                if (pOpenThread == IntPtr.Zero)
-                {
-                    continue;
-                }
-
-                SuspendThread(pOpenThread);
-
-                CloseHandle(pOpenThread);
+                ResumeProcess(newGame);
+                ShowWindow(newGame.MainWindowHandle, 3);
+                SetForegroundWindow(newGame.MainWindowHandle);
+                currentGame = newGame;
             }
         }
 
-        public static void ResumeProcess(Process process)
+        private void SuspendProcess(Process process)
         {
-            if (process.ProcessName == string.Empty)
+            if (!gamesToShuffle.Contains(process))
+            {
+                Debug.WriteLine($"[SuspendProcess] Process {process.ProcessName} ({process.Id}) is not in the shuffle list and will not be paused.");
                 return;
+            }
+
+            if (process.HasExited)
+            {
+                gamesToShuffle.Remove(process);
+                return;
+            }
+
+            Debug.WriteLine($"[SuspendProcess] Pausing process {process.ProcessName} ({process.Id}).");
 
             foreach (ProcessThread pT in process.Threads)
             {
@@ -226,13 +283,62 @@ namespace GameShuffler
                     continue;
                 }
 
-                var suspendCount = 0;
-                do
+                try
                 {
-                    suspendCount = ResumeThread(pOpenThread);
-                } while (suspendCount > 0);
+                    SuspendThread(pOpenThread);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
+                {
+                    Debug.WriteLine($"[SuspendProcess] Failed to suspend thread {pT.Id} of process {process.ProcessName} ({process.Id}): {ex.Message}");
+                }
+                finally
+                {
+                    CloseHandle(pOpenThread);
+                }
+            }
+        }
 
-                CloseHandle(pOpenThread);
+        private void ResumeProcess(Process process)
+        {
+            if (!gamesToShuffle.Contains(process))
+            {
+                Debug.WriteLine($"[ResumeProcess] Process {process.ProcessName} ({process.Id}) is not in the shuffle list and will not be resumed.");
+                return;
+            }
+
+            if (process.HasExited)
+            {
+                gamesToShuffle.Remove(process);
+                return;
+            }
+
+            Debug.WriteLine($"[ResumeProcess] Resuming process {process.ProcessName} ({process.Id}).");
+
+            foreach (ProcessThread pT in process.Threads)
+            {
+                IntPtr pOpenThread = OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)pT.Id);
+
+                if (pOpenThread == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var suspendCount = 0;
+                    do
+                    {
+                        suspendCount = ResumeThread(pOpenThread);
+                    } while (suspendCount > 0);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException || ex is System.ComponentModel.Win32Exception)
+                {
+                    Debug.WriteLine($"[ResumeProcess] Failed to resume thread {pT.Id} of process {process.ProcessName} ({process.Id}): {ex.Message}");
+                }
+                finally
+                {
+                    CloseHandle(pOpenThread);
+                }
             }
         }
 
@@ -255,15 +361,38 @@ namespace GameShuffler
 
                 if (id == NextGameKeyId && gamesToShuffle.Any()) 
                 {
-                    if (currentGame != null)
-                    {
-                        SuspendProcess(currentGame);
-                    }
                     StartNewGame();
                 }
             }
 
             base.WndProc(ref m);
+        }
+
+        private void SaveSettings()
+        {
+            var settings = new Settings
+            {
+                SelectedProcessIds = gamesToShuffle.Select(p => p.Id).ToList(),
+                MinShuffleTime = minShuffleTime,
+                MaxShuffleTime = maxShuffleTime
+            };
+
+            var json = JsonSerializer.Serialize(settings);
+            File.WriteAllText(SettingsFilePath, json);
+        }
+
+        private void LoadSettings()
+        {
+            if (File.Exists(SettingsFilePath))
+            {
+                var json = File.ReadAllText(SettingsFilePath);
+                settings = JsonSerializer.Deserialize<Settings>(json) ?? new Settings();
+
+                minShuffleTime = settings.MinShuffleTime;
+                maxShuffleTime = settings.MaxShuffleTime;
+                minTimeTextBox.Text = minShuffleTime.ToString();
+                maxTimeTextBox.Text = maxShuffleTime.ToString();
+            }
         }
     }
 }

@@ -196,13 +196,26 @@ namespace GameShuffler
 
                 StartNewGame();
 
-                for (int i = 0; i < rand.Next(minShuffleTime, maxShuffleTime) * 1000; i += 100)
+                // Calculate a new shuffle time for each iteration
+                int shuffleTime = rand.Next(minShuffleTime, maxShuffleTime) * 1000;
+                int elapsedTime = 0;
+                while (elapsedTime < shuffleTime)
                 {
                     if (stopShuffle)
                     {
                         return;
                     }
                     Thread.Sleep(100);
+                    elapsedTime += 100;
+
+                    // Check if the current game has exited
+                    if (currentGame?.HasExited == true)
+                    {
+                        Debug.WriteLine($"Current game {currentGame.ProcessName} has exited.");
+                        gamesToShuffle.Remove(currentGame);
+                        currentGame = null;
+                        break;
+                    }
                 }
             }
 

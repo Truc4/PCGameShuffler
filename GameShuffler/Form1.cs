@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.IO;
+using System.Text;
 using GameShuffler;
 
 namespace GameShuffler
@@ -59,6 +60,25 @@ namespace GameShuffler
         public static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vlc);
         [DllImport("user32.dll")]
         public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        static extern int GetWindowTextLength(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
         int RemoveGameKeyId = 1;
         int RemoveGameKey = (int)Keys.PageDown;
@@ -290,7 +310,6 @@ namespace GameShuffler
                     }
                     await Task.Delay(100);
 
-                    // Check if the current game has exited
                     if (currentGame?.Process?.HasExited == true)
                     {
                         Debug.WriteLine($"Current game {currentGame.Process.ProcessName} has exited.");
@@ -311,7 +330,7 @@ namespace GameShuffler
                 SuspendGame(currentGame);
             }
 
-            GenerateGamesToShuffleList(); // Generate the shuffle list before starting a new game
+            GenerateGamesToShuffleList();
 
             var newGame = currentGame;
             while (newGame == currentGame)
@@ -351,15 +370,17 @@ namespace GameShuffler
             if (newGame != currentGame)
             {
                 ResumeGame(newGame);
+                IntPtr mainWindowHandle = newGame.WindowHandle ?? newGame.Process.MainWindowHandle;
+                Debug.WriteLine($"Starting new game: {newGame.ProcessName} (ID: {newGame.Process.Id}) with window handle: {mainWindowHandle}");
                 if (newGame.MakeFullscreen)
                 {
-                    ShowWindow(newGame.Process.MainWindowHandle, ShowWindowCommands.SW_SHOWMAXIMIZED);
+                    ShowWindow(mainWindowHandle, ShowWindowCommands.SW_SHOWMAXIMIZED);
                 }
                 else
                 {
-                    ShowWindow(newGame.Process.MainWindowHandle, ShowWindowCommands.SW_RESTORE);
+                    ShowWindow(mainWindowHandle, ShowWindowCommands.SW_RESTORE);
                 }
-                SetForegroundWindow(newGame.Process.MainWindowHandle);
+                SetForegroundWindow(mainWindowHandle);
                 currentGame = newGame;
             }
         }
@@ -394,69 +415,65 @@ namespace GameShuffler
             }));
         }
 
-        private void GenerateGamesToShuffleList()
+        private List<IntPtr> GetProcessWindows(int processId)
         {
-            gamesToShuffle.Clear();
-            Debug.WriteLine("Generating games to shuffle list...");
-            Debug.WriteLine("Desired games to shuffle:");
-            foreach (var game in settings.DesiredGamesToShuffle)
+            List<IntPtr> windows = new List<IntPtr>();
+            EnumWindows((hWnd, lParam) =>
             {
-                Debug.WriteLine($"- {game.ProcessName} (Pause: {game.Pause})");
-            }
-
-            var allProcesses = Process.GetProcesses().Where(process => !string.IsNullOrEmpty(process.MainWindowTitle)).ToList();
-            Debug.WriteLine("Running processes with main window title:");
-            foreach (var process in allProcesses)
-            {
-                Debug.WriteLine($"- {process.ProcessName} (ID: {process.Id})");
-            }
-
-            foreach (var game in settings.DesiredGamesToShuffle)
-            {
-                Debug.WriteLine($"Checking desired game: {game.ProcessName}");
-                var process = allProcesses.FirstOrDefault(p => p.ProcessName.Equals(game.ProcessName, StringComparison.OrdinalIgnoreCase) && p.MainWindowTitle.Equals(game.WindowTitle, StringComparison.OrdinalIgnoreCase));
-                if (process != null)
+                if (IsWindowVisible(hWnd))
                 {
-                    Debug.WriteLine($"Found exact match process: {process.ProcessName} (ID: {process.Id}) with window title: {process.MainWindowTitle}");
-                }
-                else
-                {
-                    process = allProcesses.FirstOrDefault(p => p.ProcessName.Equals(game.ProcessName, StringComparison.OrdinalIgnoreCase));
-                    if (process != null)
+                    int length = GetWindowTextLength(hWnd);
+                    if (length == 0) return true;
+
+                    StringBuilder builder = new StringBuilder(length);
+                    GetWindowText(hWnd, builder, length + 1);
+
+                    uint windowProcessId;
+                    GetWindowThreadProcessId(hWnd, out windowProcessId);
+
+                    if (windowProcessId == processId)
                     {
-                        Debug.WriteLine($"Found process by name: {process.ProcessName} (ID: {process.Id}) with window title: {process.MainWindowTitle}");
+                        Debug.WriteLine($"Found window for process {processId}: {builder.ToString()} (Handle: {hWnd})");
+                        windows.Add(hWnd);
                     }
                 }
+                return true;
+            }, IntPtr.Zero);
 
-                if (process != null)
+            return windows;
+        }
+
+        private void GenerateGamesToShuffleList()
+        {
+            var allProcesses = Process.GetProcesses().Where(process => !string.IsNullOrEmpty(process.MainWindowTitle)).ToList();
+            var existingProcesses = gamesToShuffle.Where(g => g.Process != null && !g.Process.HasExited).ToList();
+
+            gamesToShuffle.RemoveAll(g => g.Process == null || g.Process.HasExited);
+
+            foreach (var game in settings.DesiredGamesToShuffle)
+            {
+                if (!gamesToShuffle.Any(g => g.ProcessName == game.ProcessName))
                 {
-                    game.Process = process;
-                    gamesToShuffle.Add(game);
-
-                    if (game.ConnectedGame != null)
+                    var process = allProcesses.FirstOrDefault(p => p.ProcessName.Equals(game.ProcessName, StringComparison.OrdinalIgnoreCase));
+                    if (process != null)
                     {
-                        Debug.WriteLine($"Checking connected game: {game.ConnectedGame.ProcessName}");
-                        var connectedProcess = allProcesses.FirstOrDefault(p => p.ProcessName.Equals(game.ConnectedGame.ProcessName, StringComparison.OrdinalIgnoreCase) &&
-                                                                                p.MainWindowTitle.Contains(game.ConnectedGame.ProcessName, StringComparison.OrdinalIgnoreCase));
-                        if (connectedProcess != null)
+                        var windows = GetProcessWindows(process.Id);
+                        if (windows.Count > 0)
                         {
-                            Debug.WriteLine($"Found connected game process: {connectedProcess.ProcessName} (ID: {connectedProcess.Id})");
-                            game.ConnectedGame.Process = connectedProcess;
+                            game.Process = process;
+                            game.WindowHandle = windows.First();
+                            gamesToShuffle.Add(game);
+                            Debug.WriteLine($"Matched window title: {windows.First()} for process: {game.ProcessName}");
                         }
                         else
                         {
-                            Debug.WriteLine($"Connected game process not found: {game.ConnectedGame.ProcessName}");
+                            Debug.WriteLine($"No windows found for process: {game.ProcessName}");
                         }
                     }
                 }
-                else
-                {
-                    Debug.WriteLine($"Process not found: {game.ProcessName}");
-                    game.Process = null;
-                }
             }
 
-            gamesToShuffle = gamesToShuffle.Where(g => g.Process != null && !IsSystemProcess(g.Process)).ToList();
+            gamesToShuffle = gamesToShuffle.Where(g => g.Process != null && !g.Process.HasExited && !IsSystemProcess(g.Process)).ToList();
 
             Debug.WriteLine("Games to shuffle:");
             foreach (var game in gamesToShuffle)
